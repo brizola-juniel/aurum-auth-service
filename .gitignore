@@ -1,0 +1,7 @@
+.env
+bin/
+obj/
+TestResults/
+coverage/
+*.trx
+*.log
