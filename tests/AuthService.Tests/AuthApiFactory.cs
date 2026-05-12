@@ -43,6 +43,8 @@ public sealed class AuthApiFactory : WebApplicationFactory<Program>, IAsyncLifet
         builder.UseSetting("Jwt:RefreshTokenDays", "7");
         builder.UseSetting("RateLimiting:Auth:PermitLimit", _authRateLimitPermitLimit.ToString());
         builder.UseSetting("RateLimiting:Auth:WindowSeconds", "60");
+        builder.UseSetting("Logging:LogLevel:Microsoft.AspNetCore.DataProtection", "Error");
+        builder.UseSetting("Logging:LogLevel:Microsoft.EntityFrameworkCore.Update", "Critical");
     }
 
     public async Task InitializeAsync()
