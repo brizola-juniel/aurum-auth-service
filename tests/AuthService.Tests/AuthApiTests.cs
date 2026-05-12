@@ -56,6 +56,73 @@ public sealed class AuthApiTests(AuthApiFactory factory) : IClassFixture<AuthApi
     }
 
     [Fact]
+    public async Task RegisterAndLoginTreatEmailCaseInsensitively()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var mixedCaseEmail = $"Case-{suffix}@Aurum.Test";
+        var normalizedEmail = mixedCaseEmail.ToLowerInvariant();
+
+        var register = await _client.PostAsJsonAsync("/api/auth/register", new RegisterRequest(
+            mixedCaseEmail,
+            "StrongPass123!"));
+        Assert.Equal(HttpStatusCode.Created, register.StatusCode);
+        var payload = await register.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.Equal(normalizedEmail, payload!.User.Email);
+
+        var duplicate = await _client.PostAsJsonAsync("/api/auth/register", new RegisterRequest(
+            normalizedEmail,
+            "StrongPass123!"));
+        Assert.Equal(HttpStatusCode.Conflict, duplicate.StatusCode);
+
+        var login = await _client.PostAsJsonAsync("/api/auth/login", new LoginRequest(
+            mixedCaseEmail.ToUpperInvariant(),
+            "StrongPass123!"));
+        Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+    }
+
+    [Fact]
+    public async Task ConcurrentDuplicateRegistrationReturnsConflictInsteadOfServerError()
+    {
+        using var factory = new AuthApiFactory();
+        await factory.InitializeAsync();
+        var client = factory.CreateClient();
+        try
+        {
+            var request = new RegisterRequest($"race-{Guid.NewGuid():N}@aurum.test", "StrongPass123!");
+            var attempts = await Task.WhenAll(
+                Enumerable.Range(0, 6).Select(_ => client.PostAsJsonAsync("/api/auth/register", request)));
+
+            Assert.Equal(1, attempts.Count(response => response.StatusCode == HttpStatusCode.Created));
+            Assert.Equal(5, attempts.Count(response => response.StatusCode == HttpStatusCode.Conflict));
+            Assert.DoesNotContain(attempts, response => response.StatusCode == HttpStatusCode.InternalServerError);
+        }
+        finally
+        {
+            await factory.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task RegisterRejectsInvalidEmailAndShortPassword()
+    {
+        var response = await _client.PostAsJsonAsync("/api/auth/register", new RegisterRequest(
+            "not-an-email",
+            "short"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task LoginRejectsInvalidEmailAndShortPassword()
+    {
+        var response = await _client.PostAsJsonAsync("/api/auth/login", new LoginRequest(
+            "not-an-email",
+            "short"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
     public async Task LoginRejectsWrongPassword()
     {
         var email = $"login-{Guid.NewGuid():N}@aurum.test";
@@ -64,6 +131,24 @@ public sealed class AuthApiTests(AuthApiFactory factory) : IClassFixture<AuthApi
         var response = await _client.PostAsJsonAsync("/api/auth/login", new LoginRequest(email, "WrongPass123!"));
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TestingEnvironmentDoesNotExposeOpenApi()
+    {
+        var response = await _client.GetAsync("/openapi/v1.json");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public void ProductionRejectsDefaultJwtSecret()
+    {
+        using var factory = new AuthApiFactory("Production", overrideJwtSecret: false);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => factory.CreateClient());
+
+        Assert.Contains("Production Jwt__Secret must be set to a non-placeholder secret", exception.ToString());
     }
 
     [Fact]
@@ -81,5 +166,99 @@ public sealed class AuthApiTests(AuthApiFactory factory) : IClassFixture<AuthApi
 
         var replay = await _client.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(first.RefreshToken));
         Assert.Equal(HttpStatusCode.Unauthorized, replay.StatusCode);
+    }
+
+    [Fact]
+    public async Task RefreshTokenReplayRevokesActiveTokensForUser()
+    {
+        var register = await _client.PostAsJsonAsync("/api/auth/register", new RegisterRequest(
+            $"refresh-replay-{Guid.NewGuid():N}@aurum.test",
+            "StrongPass123!"));
+        var first = await register.Content.ReadFromJsonAsync<AuthResponse>();
+
+        var rotated = await _client.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(first!.RefreshToken));
+        Assert.Equal(HttpStatusCode.OK, rotated.StatusCode);
+        var second = await rotated.Content.ReadFromJsonAsync<AuthResponse>();
+
+        var replay = await _client.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(first.RefreshToken));
+        Assert.Equal(HttpStatusCode.Unauthorized, replay.StatusCode);
+
+        var secondRefreshAfterReplay = await _client.PostAsJsonAsync(
+            "/api/auth/refresh",
+            new RefreshTokenRequest(second!.RefreshToken));
+        Assert.Equal(HttpStatusCode.Unauthorized, secondRefreshAfterReplay.StatusCode);
+    }
+
+    [Fact]
+    public async Task LogoutRevokesRefreshToken()
+    {
+        var register = await _client.PostAsJsonAsync("/api/auth/register", new RegisterRequest(
+            $"logout-{Guid.NewGuid():N}@aurum.test",
+            "StrongPass123!"));
+        var payload = await register.Content.ReadFromJsonAsync<AuthResponse>();
+
+        var logout = await _client.PostAsJsonAsync("/api/auth/logout", new RefreshTokenRequest(payload!.RefreshToken));
+        Assert.Equal(HttpStatusCode.NoContent, logout.StatusCode);
+
+        var refresh = await _client.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(payload.RefreshToken));
+        Assert.Equal(HttpStatusCode.Unauthorized, refresh.StatusCode);
+    }
+
+    [Fact]
+    public async Task ConcurrentRefreshReplayAllowsOnlyOneRotation()
+    {
+        using var factory = new AuthApiFactory();
+        await factory.InitializeAsync();
+        var client = factory.CreateClient();
+        try
+        {
+            var register = await client.PostAsJsonAsync("/api/auth/register", new RegisterRequest(
+                $"race-{Guid.NewGuid():N}@aurum.test",
+                "StrongPass123!"));
+            var payload = await register.Content.ReadFromJsonAsync<AuthResponse>();
+
+            var attempts = await Task.WhenAll(
+                client.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(payload!.RefreshToken)),
+                client.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(payload.RefreshToken)));
+
+            Assert.Equal(1, attempts.Count(response => response.StatusCode == HttpStatusCode.OK));
+            Assert.Equal(1, attempts.Count(response => response.StatusCode == HttpStatusCode.Unauthorized));
+        }
+        finally
+        {
+            await factory.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task RateLimitIsPartitionedByEndpointAndIp()
+    {
+        using var factory = new AuthApiFactory(authRateLimitPermitLimit: 2);
+        await factory.InitializeAsync();
+        var client = factory.CreateClient();
+        try
+        {
+            var firstLogin = await client.PostAsJsonAsync("/api/auth/login", new LoginRequest(
+                $"missing-{Guid.NewGuid():N}@aurum.test",
+                "StrongPass123!"));
+            var secondLogin = await client.PostAsJsonAsync("/api/auth/login", new LoginRequest(
+                $"missing-{Guid.NewGuid():N}@aurum.test",
+                "StrongPass123!"));
+            var thirdLogin = await client.PostAsJsonAsync("/api/auth/login", new LoginRequest(
+                $"missing-{Guid.NewGuid():N}@aurum.test",
+                "StrongPass123!"));
+            var register = await client.PostAsJsonAsync("/api/auth/register", new RegisterRequest(
+                $"rate-{Guid.NewGuid():N}@aurum.test",
+                "StrongPass123!"));
+
+            Assert.Equal(HttpStatusCode.Unauthorized, firstLogin.StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, secondLogin.StatusCode);
+            Assert.Equal(HttpStatusCode.TooManyRequests, thirdLogin.StatusCode);
+            Assert.Equal(HttpStatusCode.Created, register.StatusCode);
+        }
+        finally
+        {
+            await factory.DisposeAsync();
+        }
     }
 }

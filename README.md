@@ -32,7 +32,7 @@ Este código funciona em dois formatos:
 
 ```env
 ConnectionStrings__DefaultConnection=Host=localhost;Port=5433;Database=authdb;Username=auth;Password=auth
-Jwt__Secret=change-this-shared-secret-with-at-least-32-bytes
+Jwt__Secret=<secret-forte-com-no-minimo-32-bytes>
 Jwt__Issuer=aurum-auth-service
 Jwt__Audience=aurum-reservation-system
 Jwt__AccessTokenMinutes=60
@@ -49,6 +49,7 @@ como `JWT_SECRET`.
 - `POST /api/auth/register`
 - `POST /api/auth/login`
 - `POST /api/auth/refresh`
+- `POST /api/auth/logout`
 - `GET /api/auth/me`
 
 ## Rodar no monorepo
@@ -96,7 +97,7 @@ docker run --rm \
   -p 5000:8080 \
   -e ASPNETCORE_URLS=http://+:8080 \
   -e ConnectionStrings__DefaultConnection="Host=aurum-auth-postgres;Port=5432;Database=authdb;Username=auth;Password=auth" \
-  -e Jwt__Secret=change-this-shared-secret-with-at-least-32-bytes \
+  -e Jwt__Secret="$JWT_SHARED_SECRET" \
   -e Jwt__Issuer=aurum-auth-service \
   -e Jwt__Audience=aurum-reservation-system \
   -e Jwt__AccessTokenMinutes=60 \
@@ -163,3 +164,7 @@ Detalhes adicionais ficam em `TESTING.md`.
 Diretrizes de divulgação, rotação de segredo e baseline de segurança ficam em
 `SECURITY.md`. Não publique tokens, connection strings ou payloads sensíveis em
 issues, logs ou evidências de teste.
+
+Em `Production`, o serviço rejeita segredos ausentes, curtos ou placeholders conhecidos
+antes de iniciar. O logout revoga o refresh token opaco no banco; refresh concorrente usa
+atualização atômica para impedir reuso do token antigo.

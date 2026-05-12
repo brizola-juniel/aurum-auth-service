@@ -30,6 +30,7 @@ public interface IAuthManager
     Task<AuthResponse> RegisterAsync(RegisterRequest request, CancellationToken cancellationToken);
     Task<AuthResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken);
     Task<AuthResponse> RefreshAsync(RefreshTokenRequest request, CancellationToken cancellationToken);
+    Task RevokeRefreshTokenAsync(RefreshTokenRequest request, CancellationToken cancellationToken);
     Task<UserResponse?> FindUserAsync(Guid userId, CancellationToken cancellationToken);
 }
 
@@ -56,8 +57,15 @@ public sealed class AuthManager(
             PasswordHash = passwordHasher.Hash(request.Password)
         };
 
-        dbContext.Users.Add(user);
-        return await PersistTokensAsync(user, cancellationToken);
+        try
+        {
+            dbContext.Users.Add(user);
+            return await PersistTokensAsync(user, cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsUniqueConstraintViolation(exception))
+        {
+            throw new DuplicateUserException(email);
+        }
     }
 
     public async Task<AuthResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken)
@@ -75,18 +83,53 @@ public sealed class AuthManager(
     public async Task<AuthResponse> RefreshAsync(RefreshTokenRequest request, CancellationToken cancellationToken)
     {
         var tokenHash = jwtTokenService.HashRefreshToken(request.RefreshToken);
+        var now = DateTimeOffset.UtcNow;
+
         var refreshToken = await dbContext.RefreshTokens
+            .AsNoTracking()
             .Include(token => token.User)
             .SingleOrDefaultAsync(token => token.TokenHash == tokenHash, cancellationToken);
 
-        var now = DateTimeOffset.UtcNow;
-        if (refreshToken?.User is null || !refreshToken.IsActive(now))
+        if (refreshToken?.User is null)
         {
             throw new InvalidRefreshTokenException();
         }
 
-        refreshToken.RevokedAt = now;
+        if (refreshToken.RevokedAt is not null)
+        {
+            await RevokeActiveRefreshTokensForUserAsync(refreshToken.UserId, now, cancellationToken);
+            throw new InvalidRefreshTokenException();
+        }
+
+        if (!refreshToken.IsActive(now))
+        {
+            throw new InvalidRefreshTokenException();
+        }
+
+        var revokedTokens = await dbContext.RefreshTokens
+            .Where(token => token.TokenHash == tokenHash && token.RevokedAt == null)
+            .ExecuteUpdateAsync(
+                setters => setters.SetProperty(token => token.RevokedAt, now),
+                cancellationToken);
+
+        if (revokedTokens != 1)
+        {
+            throw new InvalidRefreshTokenException();
+        }
+
         return await PersistTokensAsync(refreshToken.User, cancellationToken);
+    }
+
+    public async Task RevokeRefreshTokenAsync(RefreshTokenRequest request, CancellationToken cancellationToken)
+    {
+        var tokenHash = jwtTokenService.HashRefreshToken(request.RefreshToken);
+        var now = DateTimeOffset.UtcNow;
+
+        await dbContext.RefreshTokens
+            .Where(token => token.TokenHash == tokenHash && token.RevokedAt == null)
+            .ExecuteUpdateAsync(
+                setters => setters.SetProperty(token => token.RevokedAt, now),
+                cancellationToken);
     }
 
     public async Task<UserResponse?> FindUserAsync(Guid userId, CancellationToken cancellationToken)
@@ -117,5 +160,25 @@ public sealed class AuthManager(
             new UserResponse(user.Id, user.Email));
     }
 
+    private async Task RevokeActiveRefreshTokensForUserAsync(
+        Guid userId,
+        DateTimeOffset revokedAt,
+        CancellationToken cancellationToken)
+    {
+        await dbContext.RefreshTokens
+            .Where(token => token.UserId == userId && token.RevokedAt == null)
+            .ExecuteUpdateAsync(
+                setters => setters.SetProperty(token => token.RevokedAt, revokedAt),
+                cancellationToken);
+    }
+
     private static string NormalizeEmail(string email) => email.Trim().ToLowerInvariant();
+
+    private static bool IsUniqueConstraintViolation(DbUpdateException exception)
+    {
+        var message = exception.InnerException?.Message ?? exception.Message;
+        return message.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("23505", StringComparison.OrdinalIgnoreCase);
+    }
 }
