@@ -1,0 +1,73 @@
+version: 2
+
+updates:
+  - package-ecosystem: nuget
+    directory: /src/AuthService
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: America/Sao_Paulo
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - dotnet
+    groups:
+      aspnet-efcore:
+        patterns:
+          - Microsoft.AspNetCore.*
+          - Microsoft.EntityFrameworkCore.*
+      jwt-postgres:
+        patterns:
+          - System.IdentityModel.Tokens.Jwt
+          - Npgsql.*
+
+  - package-ecosystem: nuget
+    directory: /tests/AuthService.Tests
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:10"
+      timezone: America/Sao_Paulo
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - tests
+    groups:
+      test-stack:
+        patterns:
+          - Microsoft.*
+          - xunit*
+          - coverlet.*
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:20"
+      timezone: America/Sao_Paulo
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      actions:
+        patterns:
+          - actions/*
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:30"
+      timezone: America/Sao_Paulo
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docker
+    groups:
+      dotnet-images:
+        patterns:
+          - mcr.microsoft.com/dotnet/*

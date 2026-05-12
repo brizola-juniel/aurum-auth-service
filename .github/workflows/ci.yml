@@ -1,0 +1,92 @@
+name: auth-service-ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  auth-quality:
+    name: auth-quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+      NUGET_XMLDOC_MODE: skip
+      SDK_IMAGE: mcr.microsoft.com/dotnet/sdk:10.0-alpine
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Show Docker and SDK versions
+        run: |
+          docker version
+          docker run --rm "$SDK_IMAGE" dotnet --info
+
+      - name: Restore
+        run: |
+          docker run --rm \
+            -e DOTNET_CLI_TELEMETRY_OPTOUT \
+            -e DOTNET_NOLOGO \
+            -e NUGET_XMLDOC_MODE \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            "$SDK_IMAGE" \
+            sh -lc "dotnet restore tests/AuthService.Tests/AuthService.Tests.csproj"
+
+      - name: Build
+        run: |
+          docker run --rm \
+            -e DOTNET_CLI_TELEMETRY_OPTOUT \
+            -e DOTNET_NOLOGO \
+            -e NUGET_XMLDOC_MODE \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            "$SDK_IMAGE" \
+            sh -lc "dotnet build src/AuthService/AuthService.csproj --configuration Release --no-restore -warnaserror"
+
+      - name: Test
+        run: |
+          docker run --rm \
+            -e DOTNET_CLI_TELEMETRY_OPTOUT \
+            -e DOTNET_NOLOGO \
+            -e NUGET_XMLDOC_MODE \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            "$SDK_IMAGE" \
+            sh -lc "dotnet test tests/AuthService.Tests/AuthService.Tests.csproj --configuration Release --no-restore --logger 'trx;LogFileName=auth-service-tests.trx' --collect:'XPlat Code Coverage' --results-directory TestResults"
+
+      - name: Publish smoke
+        run: |
+          docker run --rm \
+            -e DOTNET_CLI_TELEMETRY_OPTOUT \
+            -e DOTNET_NOLOGO \
+            -e NUGET_XMLDOC_MODE \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            "$SDK_IMAGE" \
+            sh -lc "dotnet publish src/AuthService/AuthService.csproj --configuration Release --no-restore --output /tmp/aurum-auth-publish"
+
+      - name: Docker image build
+        run: docker build --pull --tag aurum-auth-service:ci .
+
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: auth-service-test-results
+          path: TestResults/
+          if-no-files-found: warn
+          retention-days: 14
